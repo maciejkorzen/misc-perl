@@ -1,0 +1,218 @@
+#!perl -CS
+##### LICENSE ###############################################################
+# Copyright 2012 Maciej Korzen
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+##### AUTHOR ################################################################
+# Maciej Korzen
+# maciek@korzen.org, mkorzen@gmail.com
+# http://www.korzen.org/
+
+use File::Basename;
+use Getopt::Std;
+use MediaWiki::API;
+use strict;
+use warnings;
+
+my $myname = basename($0);
+my $pageName = "";
+# If Wiki page does not exist, it will be created. Following category will be added.
+my $defaultCategory = "Serwery";
+# Warning message that will be prepended to automatically generated content.
+my $warningMessage = "Warning!!! Following content was generated automatically. All edits will be discarded on next program run.";
+
+sub usage
+{
+	print "Usage: " . $myname . " [-n wiki-page-name] runtime-data-file\n
+-n wiki-page-name	Name of page in Wiki to edit.
+                 	If not given, 'hostname -f' will be used.\n
+runtime-data-file can be obtained using following script:
+https://github.com/maciejkorzen/misc-sh/blob/master/linux-dump-runtime-data
+
+You must set following environmental variables:
+- WIKILOGIN (your Wiki login)
+- WIKIPASS (password)
+- WIKIURL (URL to Wiki's php.api, for example: https://wiki.company.lan/api.php)
+
+You can set following environmental variables:
+- WIKIDOMAIN (domain for logging in to Wiki, if you use it)\n";
+}
+
+sub processArgs
+{
+	my %options=();
+
+	if (!getopts("n:h", \%options))
+	{
+		usage();
+		exit(1);
+	}
+
+	if (defined($options{h}))
+	{
+		usage();
+		exit(0);
+	}
+
+	$pageName = $options{n} if defined($options{n});
+}
+
+processArgs();
+
+if (!$ARGV[0])
+{
+	usage();
+	exit(1);
+}
+
+my $inputFile = $ARGV[0];
+
+if (!$ENV{'WIKIPASS'})
+{
+	die "Set WIKIPASS!"
+}
+my $password = "";
+$password = $ENV{'WIKIPASS'};
+if ($password eq "")
+{
+	die "Set WIKIPASS!"
+}
+
+if (!$ENV{'WIKILOGIN'})
+{
+	die "Set WIKILOGIN!"
+}
+my $wikilogin = "";
+$wikilogin = $ENV{'WIKILOGIN'};
+if ($wikilogin eq "")
+{
+	die "Set WIKILOGIN!"
+}
+
+if (!$ENV{'WIKIURL'})
+{
+	die "Set WIKIURL!"
+}
+my $wikiurl = "";
+$wikiurl = $ENV{'WIKIURL'};
+if ($wikiurl eq "")
+{
+	die "Set WIKIURL!"
+}
+
+if (!$ENV{'WIKIDOMAIN'})
+{
+	die "Set WIKIDOMAIN!"
+}
+my $wikidomain = "";
+$wikidomain = $ENV{'WIKIDOMAIN'};
+if ($wikidomain eq "")
+{
+	die "Set WIKIDOMAIN!"
+}
+
+my $mw = MediaWiki::API->new();
+$mw->{config}->{api_url} = $wikiurl;
+$mw->{ua}->ssl_opts(verify_hostname => 0);
+
+if ($wikidomain ne "")
+{
+	$mw->login({ lgname => $wikilogin, lgpassword => $password, lgdomain => $wikidomain })
+	|| die $mw->{error}->{code} . ': ' . $mw->{error}->{details};
+} else {
+	$mw->login({ lgname => $wikilogin, lgpassword => $password })
+	|| die $mw->{error}->{code} . ': ' . $mw->{error}->{details};
+}
+
+print "[+] Logged in\n";
+
+my $all_pages = ",";
+my $articles = $mw->list ({
+	action => 'query',
+	list => 'allpages'})
+	|| die $mw->{error}->{code} . ': ' . $mw->{error}->{details};
+
+my @all_pages;
+foreach (@{$articles}) {
+	$all_pages .= lc($_->{title}) . ",";
+}
+if (-f $inputFile)
+{
+	open(DUMP, "<$inputFile") or die "Can't open file '" . $inputFile . "'";
+	my $dump_content = "";
+	my $line;
+	my $currentPageName = $pageName;
+	my $nextWillBeHostname = 0;
+	while ($line = <DUMP>)
+	{
+		chomp($line);
+		$dump_content .= $line . "\n";
+		if ($pageName ne "")
+		{
+			next;
+		}
+		if ($line eq "== hostname -f ==")
+		{
+			$nextWillBeHostname = 1;
+			next;
+		}
+		if ($nextWillBeHostname == 1)
+		{
+			$currentPageName = $line;
+			print "[+] Autodetected page name: '" . $line . "'\n";
+			$nextWillBeHostname = 0;
+		}
+	}
+	close(DUMP);
+	if ($currentPageName eq "")
+	{
+		die "No Wiki page name given or autodetected";
+	}
+	$dump_content =~ s/\n*$//;
+	print "[+] Editing $currentPageName\n";
+	my $ref = $mw->get_page( { title => $currentPageName } );
+	my $timestamp = $ref->{timestamp};
+	my $content = "";
+	if ($all_pages =~ /,$pageName,/)
+	{
+		$content = $ref->{'*'};
+	}
+
+	if (!($content =~ m/<div id="auto-config-dump-begin">.*<div id="auto-config-dump-end">/s))
+	{
+		if ($content =~ m/\[\[Category:/)
+		{
+			$content =~ s/\[\[Category:/<div id="auto-config-dump-begin"><div id="auto-config-dump-end">\n[[Category:/;
+		} else {
+			$content .= "\n<div id=\"auto-config-dump-begin\"><div id=\"auto-config-dump-end\">\n[[Category:" . $defaultCategory . "]]";
+		}
+	}
+	$dump_content =~ s,== ,</pre>\n== ,g;
+	$dump_content =~ s, ==, ==\n<pre>,g;
+	$dump_content =~ s,^</pre>\n,,;
+	$dump_content .= "</pre>";
+	$dump_content =~ s,\s*</pre>,</pre>,g;
+	$content =~ s^<div id="auto-config-dump-begin">.*<div id="auto-config-dump-end">^<div id="auto-config-dump-begin">\n=Configuration dump=\n<small><b><font color=red>$warningMessage<\/font><\/b><\/small>\n$dump_content<div id="auto-config-dump-end">^s;
+	$mw->edit( {
+		action => 'edit',
+		title => $currentPageName,
+		basetimestamp => $timestamp,
+		text => $content } )
+		|| die $mw->{error}->{code} . ': ' . $mw->{error}->{details};
+}
+
+print "[+] Finished. Logging out.\n";
+$mw->logout();

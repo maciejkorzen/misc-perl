@@ -1,0 +1,165 @@
+#!/usr/bin/perl -T
+
+# Maciej Korzen
+# maciek@korzen.org, mkorzen@gmail.com
+# http://www.korzen.org
+
+# This is sample script that backups selected subdirectories from current directory.
+# Look at the end of script for details.
+
+use strict;
+use warnings;
+
+$ENV{'PATH'} = '/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin';
+my $cwd = `pwd`;
+chomp($cwd);
+$cwd =~ /(.*)/;
+$cwd = $1;
+my $system = `uname`;
+chomp($system);
+my $pathPax = '/usr/bin/pax';
+my $pathBzip2 = '/bin/bzip2';
+if ($system eq 'FreeBSD')
+{
+	$pathPax = '/bin/pax';
+}
+
+sub pathLastDir
+{
+	return (split(/\//, $_[0]))[-1];
+}
+
+sub pathWithoutLastDir
+{
+	my @a = split(/\//, $_[0]);
+	pop(@a);
+	return join('/', @a);
+}
+
+# lsFiles(directory)
+# return list of files in this directory (non-recursive)
+sub lsFiles
+{
+	if (! -e $_[0])
+	{
+		return 0;
+	}
+	opendir(D, $_[0]);
+	my @l = readdir(D);
+	closedir(D);
+	my @r;
+	foreach my $i (@l)
+	{
+		if ((-f $_[0] . '/' . $i) && ($i ne '.') && ($i ne '..') )
+		{
+			push(@r, $i);
+		}
+	}
+	return @r;
+}
+# lsDirs(directory)
+# return list of dirs in this directory (non-recursive)
+sub lsDirs
+{
+	if (! -e $_[0])
+	{
+		return 0;
+	}
+	opendir(D, $_[0]);
+	my @l = readdir(D);
+	closedir(D);
+	my @r;
+	foreach my $i (@l)
+	{
+		if ((-d $_[0] . '/' . $i) && ($i ne '.') && ($i ne '..') )
+		{
+			push(@r, $i);
+		}
+	}
+	return @r;
+}
+
+# archFilesToFile(@filelist, basedir, filename)
+# tarup and compress given files and put them in given file
+sub archFilesToFile
+{
+	my $f = pop(@_);
+	my $b = pop(@_);
+	if (! -e $b)
+	{
+		die;
+	}
+	if (-e $f)
+	{
+		die;
+	}
+	$b =~ /(.*)/;
+	chdir($1) or die;
+	$f =~ /(.*)/;
+	open(P, "|" . $pathPax . ' -w |' . $pathBzip2 . ' -9 > ' . $1) or die;
+	foreach my $i (@_)
+	{
+		print P $i . "\n";
+	}
+	close(P);
+	return 1;
+}
+
+# archDirToFile(directory, file)
+# tarup and compress given dir and put it in given file
+sub archDirToFile
+{
+	if (! -e $_[0])
+	{
+		die;
+	}
+	if (-e $_[1])
+	{
+		die;
+	}
+	$_[0] =~ /(.*)/;
+	chdir($1) or die;
+	$_[1] =~ /(.*)/;
+	system($pathPax . ' -w . |' . $pathBzip2 . ' -9 > ' . $1) && die;
+}
+
+# archDir(sourceDirectory, destinationDirectory)
+# Archivizes directory into multiple pax.bz2 files and puts them into dest. directory.
+sub archDir
+{
+	my $f = $_[0];
+	my $t = $_[1];
+
+	if (! -e $f)
+	{
+		return 0;
+	}
+	if (! -e $t)
+	{
+		$t =~ /(.*)/;
+		mkdir($1) || return 0;
+	}
+	my @l = lsDirs($f);
+	foreach my $i (@l)
+	{
+		archDirToFile($f . '/' . $i, $t . '/' . $i . '.pax.bz2');
+	}
+	@l = lsFiles($f);
+	if ($#l != -1)
+	{
+		archFilesToFile(@l, $f, $t . '/_' . pathLastDir($f) . '.pax.bz2');
+	}
+}
+
+(my $sec, my $min, my $hour, my $mday, my $mon, my $year) = (localtime(time))[0,1,2,3,4,5];
+$year += 1900;
+$mon++;
+my $backupDir = sprintf($cwd . '/archTo/%u.%02u.%02u-%02u.%02u.%02u', $year, $mon, $mday, $hour, $min, $sec);
+my $backupDirHome = $backupDir . '/home';
+mkdir($backupDir) or die;
+mkdir($backupDirHome) or die;
+archDir($cwd . '/archFrom/home', $backupDirHome);
+system('find ' . $backupDir . ' -type f');
+my $backupDirWspolne = $backupDir . '/wspolne';
+mkdir($backupDirWspolne) or die;
+archDir($cwd . '/archFrom/wspolne', $backupDirWspolne);
