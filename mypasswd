@@ -1,0 +1,714 @@
+#!/usr/bin/perl -T
+
+##### DESCRIPTION ###########################################################
+# Simple wrapper script to change Samba 3, htpasswd and system password with
+# one tool.
+#
+##### USAGE #################################################################
+# Run ./mypasswd -h to see usage.
+#
+##### LICENSE ###############################################################
+# Copyright 2013 Maciej Korzen
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 dated June, 1991.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+##### AUTHOR ################################################################
+# Maciej Korzen
+# maciek@korzen.org, mkorzen@gmail.com
+# http://www.korzen.org/
+
+use strict;
+use warnings;
+use Sys::Syslog;
+use File::Basename;
+use Crypt::PassGen qw/ passgen /;
+use Term::ReadKey;
+
+my $myerr = '';
+my @otherArgs = ();
+my $quiet = 0;
+my $generatePasswd = 0;
+my @useBackends = ();
+my $action = undef;
+my $myname = basename($0);
+my $debug = 0;
+my $output = 'stdout';
+my $htpasswdFile = '/usr/local/www/passwd-www';
+my $login = undef;
+my $name = undef;
+my $quotaDefault = "-b -q 500000 -l 600000";
+my @backends = ('system', 'htpasswd', 'samba');
+$ENV{'PATH'} = '/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin';
+my $uname = `uname`;
+$uname =~ m/(.*)/;
+$uname = $1;
+my $hostname = `hostname`;
+$hostname =~ m/(.*)/;
+$hostname = $1;
+my $group = 'users';
+my $progPrefix = '/usr/local';
+my $htpasswdPath = '/usr/local/sbin/htpasswd';
+
+if ($uname eq 'Linux')
+{
+	$progPrefix = '/usr';
+	$htpasswdPath = $progPrefix . '/bin/htpasswd';
+}
+if ($hostname eq "samba-server-1")
+{
+	$htpasswdFile = '/etc/passwd-www';
+}
+if ($hostname eq 'some.public.server.com')
+{
+	$group = 'mycompany';
+}
+
+sub usage
+{
+	print "Usage: " . $myname . " -(a|c|r) [-V] [-h] [-q] [-l] [-d] [-w PATH] [-g] [-n Name] [-S] [-M] [-H] Login\n
+	-a		Add user
+	-c		Change password
+	-r		Remove user
+	-V		Verbse mode
+	-h		This help
+	-q		Quiet mode
+	-d		Output to syslog rather than stdout
+	-d		Debug
+	-w PATH		Path to file with htpasswd passwords (default is: $htpasswdFile)
+	-g		Auto generate passwords
+	-n Name		Name of uset to put in GECOS field (required for system backend)
+	-S		Change System password
+	-M		Change saMba password
+	-H		Change Htpasswd password
+	Login		Login for user to add/change/remove\n"
+}
+
+sub myVersion
+{
+	print "mypasswd 0.0\n";
+}
+
+# programEnd()
+# Things to do when program exits.
+sub programEnd
+{
+	closelog();
+	exit(0);
+}
+
+# myprint(message)
+# Outputs message to standard output or syslog, depending of run-time configuration.
+sub myprint
+{
+	if ($output eq 'syslog')
+	{
+		syslog('info', $_[0]);
+	} else {
+		print $_[0] . "\n";
+	}
+}
+
+# myHeader(function_name, @args)
+# returns formatted name of function with current arguments.
+# Ex. myHeader(foonction, argOne, second argument) prints:
+#   foonction(argOne, second argument)
+sub myHeader
+{
+	if ($debug)
+	{
+		my $r = shift;
+		$r .= "(" . shift;
+		while (defined(my $i = shift)) { $r .= ", " . $i; }
+		$r .= ')';
+		myprint($r);
+	}
+}
+
+# grepInFile(path/to/file, expression)
+# Searches for expression in file
+# returns number of matches found. 0 if none.
+sub grepInFile
+{
+	my ($f, $e) = @_;
+	if (!open(F, $f))
+	{
+		$myerr = "Error opening file: $!.";
+		return undef;
+	}
+	my @l = <F>;
+	close(F);
+	chomp(@l);
+	return grep(/$e/, @l);
+
+}
+
+# systemCheck(username)
+# Check if "username" exists in system password database.
+# Returns 1 if exists, and 0 if does not exist.
+sub systemCheck
+{
+	myHeader('systemCheck', @_);
+	$_[0] =~ /(.*)/;
+	my $name = $1;
+	my $r = grepInFile('/etc/passwd', "^$name:");
+	if (!defined($r)) { return 0; }
+	if ($debug)
+	{
+		my $tmp = $r == 1 ? "" : "does not ";
+		myprint("User " . $name . " " . $tmp . "exist in system password database.");
+	}
+	$r == 1 ? return 1 : return 0;
+}
+
+# systemAdd(username, password, group, firstAndLastName)
+# Adds user to system database with given data.
+sub systemAdd
+{
+	my ($login, $pass, $group, $name) = @_;
+	myHeader('systemAdd', @_);
+	if (systemCheck($login))
+	{
+		$myerr = "User already exists in system database.";
+		return 0;
+	}
+	$login =~ m/(.*)/;
+	$login = $1;
+	$name =~ m/(.*)/;
+	$name = $1;
+	if ($uname eq "FreeBSD")
+	{
+		if (!open(PW, "|/usr/sbin/pw useradd \"" . $login . "\" -g \"" . $group . "\" -c \"" . $name . "\" -h 0"))
+		{
+			$myerr = "Error opening /usr/sbin/pw.";
+			return(0);
+		}
+		print PW $pass;
+		close(PW);
+	} else {
+		system("/usr/sbin/useradd -m -s /bin/false -g \"" . $group . "\" -c \"" . $name . "\" \"" . $login . "\"");
+		if ($? == 1)
+		{
+			$myerr = "Error running useradd.";
+			return(0);
+		}
+		if (!systemChangePass($login, $pass))
+		{
+			return(0);
+		}
+	}
+	if (!systemCheck($login))
+	{
+		$myerr = "User has not been added to system. Chceck output of 'pw'.";
+		return 0;
+	}
+	return 1;
+}
+
+# systemChangePass(login, newPassword)
+# Changes system password for given user.
+sub systemChangePass
+{
+	myHeader('systemChangePass', @_);
+	if (!systemCheck($_[0]))
+	{
+		$myerr = "Can't change pass for non existing system user.";
+		return 0;
+	}
+	if ($uname eq 'FreeBSD')
+	{
+		if (!open(PW, "|/usr/sbin/pw usermod \"" . $_[0] . "\" -h 0"))
+		{
+			 $myerr = "Error opening /usr/sbin/pw for changing password: $!.";
+			 return 0;
+		}
+		print PW $_[1];
+		close(PW);
+	} else {
+		if (!open(PASSWD, '|/usr/sbin/chpasswd'))
+		{
+			$myerr = "Error opening /usr/sbin/chpasswd: $!.";
+			return(0);
+		}
+		print PASSWD "$_[0]:$_[1]\n";
+		close(PASSWD);
+	}
+	return(1);
+}
+
+# systemRemove(login)
+# Remove given user from system password database.
+sub systemRemove
+{
+	myHeader('systemRemove', @_);
+	if (!systemCheck($_[0]))
+	{
+		$myerr = "Can't remove non existing system user.";
+		return 0;
+	}
+	$_[0] =~ m/(.*)/;
+	# now $1 is untainted version of $_[0] !
+	my $cmd = undef;
+	if ($uname eq 'FreeBSD')
+	{
+		$cmd = "/usr/sbin/pw userdel \"" . $1 . "\"";
+	} else {
+		$cmd = "/usr/sbin/userdel \"$1\"";
+	}
+	system($cmd);
+	if ($? != 0)
+	{
+		$myerr = 'Error removing user from system password database';
+		return(0);
+	}
+	return(1);
+}
+
+# sambaCheck(username)
+# Check if "username" exists in samba.
+# Returns 1 if exists, and 0 if does not exist.
+sub sambaCheck
+{
+	myHeader('sambaCheck', @_);
+	if (!open(PDB, $progPrefix . "/bin/pdbedit -L|"))
+	{
+		$myerr = "Can't open pdbedit: $!.";
+		return 0;
+	}
+	my @list = <PDB>;
+	close(PDB);
+	chomp(@list);
+	my $ret = grep(/^$_[0]:/, @list);
+	if ($debug)
+	{
+		my $tmp = $ret == 1 ? "" : "does not ";
+		myprint("User " . $_[0] . " " . $tmp . "exist in database.");
+	}
+	$ret == 1 ? return 1 : return 0;
+}
+
+# sambaAdd(username, password, group, firstAndLastName)
+# Adds user to system database with given data.
+sub sambaAdd
+{
+	my ($login, $pass, $group, $name) = @_;
+	myHeader('sambaAdd', @_);
+	if (sambaCheck($login))
+	{
+		$myerr = "User already exists in samba database.";
+		return 0;
+	}
+	$login =~ m/(.*)/;
+	$login = $1;
+	if (!open(SMBPASSWD, "|" . $progPrefix . "/bin/smbpasswd -s -a \"" . $login . "\""))
+	{
+		$myerr = "Error opening smbpasswd: $!.";
+		return 0;
+	}
+	print SMBPASSWD "$pass\n$pass\n";
+	close(SMBPASSWD);
+	if (!sambaCheck($login))
+	{
+		$myerr = "User has not been added to samba.";
+		return 0;
+	}
+	return 1;
+}
+
+# sambaChangePass(login, newPassword)
+# Changes samba password for given user.
+sub sambaChangePass
+{
+	myHeader('sambaChangePass', @_);
+	if (!sambaCheck($_[0]))
+	{
+		$myerr = "Can't change pass for non existing samba user.";
+		return 0;
+	}
+	if (!open(SMBPASSWD, '|' . $progPrefix . "/bin/smbpasswd -s \"" . $_[0] . "\""))
+	{
+		 $myerr = 'Error opening smbpasswd for changing password.';
+		 return 0;
+	}
+	print SMBPASSWD "$_[1]\n$_[1]\n";
+	close(SMBPASSWD);
+	return(1);
+}
+
+# sambaRemove(login)
+# Remove given user from samba password database.
+sub sambaRemove
+{
+	myHeader('sambaRemove', @_);
+	if (!sambaCheck($_[0]))
+	{
+		$myerr = "Can't remove non existing samba user.";
+		return 0;
+	}
+	$_[0] =~ m/(.*)/;
+	# now $1 is untainted version of $_[0] !
+	system($progPrefix . "/bin/smbpasswd -x \"" . $1 . "\"");
+	if ($?)
+	{
+		$myerr = 'Error removing user from samba password database.';
+		return(0);
+	}
+	return(1);
+}
+
+# htpasswdCheck(username)
+# Check if "username" exists in htpasswd.
+# Returns 1 if exists, and 0 if does not exist.
+sub htpasswdCheck
+{
+	myHeader('htpasswdCheck', @_);
+	my $r = grepInFile($htpasswdFile, "^$name:");
+	if (!defined($r)) { return 0; }
+	if ($debug)
+	{
+		my $tmp = $r == 1 ? "" : "does not ";
+		myprint("User " . $_[0] . " " . $tmp . "exist in database.");
+	}
+	$r == 1 ? return 1 : return 0;
+}
+
+# htpasswdAdd(username, password, group, firstAndLastName)
+# Adds user to system database with given data.
+sub htpasswdAdd
+{
+	myHeader('htpasswdAdd', @_);
+	my ($login, $pass, $group, $name) = @_;
+	if (htpasswdCheck($login))
+	{
+		$myerr = "User already exists in htpasswd database.";
+		return 0;
+	}
+	$login =~ /(.*)/;
+	$login = $1;
+	$pass =~ /(.*)/;
+	$pass = $1;
+	if (system($htpasswdPath . " -b \"" . $htpasswdFile . "\" \"" . $login . "\" \"" . $pass . "\"" . ">/dev/null 2>&1"))
+	{
+		$myerr = 'Error adding user by htpasswd: ' . $! . '.';
+		return 0;
+	}
+	return 1;
+}
+
+# htpasswdChangePass(login, newPassword)
+# Changes htpasswd password for given user.
+sub htpasswdChangePass
+{
+	myHeader('htpasswdChangePass', @_);
+	if (!htpasswdCheck($_[0]))
+	{
+		$myerr = "Can't change pass for non existing htpasswd user.";
+		return 0;
+	}
+	if (system($htpasswdPath . " -b \"" . $htpasswdFile . "\" \"" . $_[0] . "\" \"" . $_[1] . "\"" . ">/dev/null 2>&1"))
+	{
+		$myerr = "Error changig password by htpasswd: $!.";
+		return 0;
+	}
+	return 1;
+}
+
+# htpasswdRemove(login)
+# Remove given user from htpasswd password database.
+sub htpasswdRemove
+{
+	myHeader('htpasswdRemove', @_);
+	if (!htpasswdCheck($_[0]))
+	{
+		$myerr = "Can't remove non existing htpasswd user.";
+		return 0;
+	}
+	$_[0] =~ m/(.*)/;
+	my $name = $1;
+	$htpasswdFile =~ m/(.*)/;
+	$htpasswdFile = $1;
+	system($htpasswdPath . " -D " . $htpasswdFile . " " . $name . ">/dev/null 2>&1");
+	if ($?)
+	{
+		$myerr = "Error removing user from htpasswd database: $!.";
+		return(0);
+	}
+	return(1);
+}
+
+# passAsk()
+# Ask interactively for password.
+sub passAsk
+{
+        my $h1 = 'a';
+        my $h2 = 'b';
+        my $loop = 1;
+        while($loop == 1)
+        {
+                print "New password: ";
+                ReadMode('noecho');
+                $h1 = ReadLine(0);
+                ReadMode('restore');
+                print "\nPassword again: ";
+                ReadMode('noecho');
+                $h2 = ReadLine(0);
+                ReadMode('restore');
+                print "\n";
+                chomp($h1);
+                chomp($h2);
+                if (!($h1 eq $h2))
+                {
+                        print "Passwords don't match. Again Please.\n\n";
+                } elsif (length($h1) < 8){
+                        print "Password too short. Must be at least 8.\n\n";
+		} elsif (!($h1 =~ m/^[A-Za-z0-9_-]+$/)) {
+			print "Unallowed signs in password. Allowed are: A-Z a-z 0-9 _ -. Again please.\n\n";
+                } else {
+                        $loop = 0;
+                }
+        }
+        return $h1;
+}
+
+# passGen()
+# Generates random password and returns it;
+sub passGen
+{
+	my $p = (passgen( NWORDS => 1, NLETT => 12 ))[0] or die "Error generating random password";
+	print "New password for user " . $login . " is: " . $p . ".\n";
+	return $p;
+}
+
+# selfTest()
+# Check if program is working correctly.
+sub selfTest
+{
+	no strict 'refs';
+	myprint("Turning on debug.");
+	$debug = 1;
+	foreach my $i (@backends)
+	{
+		myprint("Testing backend $i.");
+		myprint("Checking if user root exists in database.");
+		if (&{$i . 'Check'}("root"))
+		{
+			myprint("OK. root has beend found.");
+		} else {
+			myprint("You don't have root account?! Veeery strange.");
+		}
+		myprint("Checking if user ThisUserShouldNotExist exists in $i database.");
+		if (&{$i . 'Check'}("ThisUserShouldNotExist"))
+		{
+			myprint("Strange! You have got such user!");
+		} else {
+			myprint("OK. No such user.");
+		}
+		my $testuser = 'fooser';
+		if (&{$i . 'Check'}($testuser))
+		{
+			myprint("User named $testuser already exist. Not testing user adding, user deleting and password changing of $i backend.");
+		} else {
+			myprint("Adding user $testuser to database.");
+			if (&{$i . 'Add'}($testuser, 'foopassword', 'users', 'James B. Ond'))
+			{
+				myprint("OK. User added.");
+			} else {
+				myprint("Error! User not added.");
+			}
+			myprint("Changing password for user $testuser.");
+			if (&{$i . 'ChangePass'}($testuser, 'sechrGut'))
+			{
+				myprint("OK. Password changed.");
+			} else {
+				myprint("Error! Password not changed.");
+			}
+			myprint("Removing user $testuser.");
+			if (&{$i . 'Remove'}($testuser))
+			{
+				myprint("OK. User removed.");
+			} else {
+				myprint("Error! User not removed! You have to remove user $testuser manually!");
+			}
+		}
+	}
+	myprint("End of self-test.");
+}
+
+# pass() - generate password or ask user for it depending on configuration
+# returns password as scalar
+sub pass
+{
+	return $generatePasswd == 1 ? passGen() : passAsk();
+}
+
+
+# addUser() - adds given user to all backends
+sub addUser
+{
+	my $pass = undef;
+	# sort in reverse order, so system will be before samba, which requires system acount to be created first
+	@useBackends = sort {$b cmp $a } @useBackends;
+	foreach my $i (@useBackends)
+	{
+		no strict 'refs';
+		if (&{$i . 'Check'}($login))
+		{
+			myprint("User already exists in $i database.");
+			next;
+		}
+		if (($i eq 'samba') && (systemCheck($login) == 0))
+		{
+			myprint("Samba requires that user should exist in system passwd file. Not adding to samba.");
+			next;
+		}
+		if (!defined($pass)) { $pass = pass(); }
+		if (&{$i . 'Add'}($login, $pass, $group, $name))
+		{
+			myprint("User has been added to $i database.");
+		} else {
+			myprint("Error adding user to " . $i . " database: $myerr");
+		}
+	}
+}
+
+# changePass() - changes password for a given user
+sub changePass
+{
+	my $pass = undef;
+	foreach my $i (@useBackends)
+	{
+		no strict 'refs';
+		if (!&{$i . 'Check'}($login))
+		{
+			myprint("User not registered in $i database.");
+			next;
+		}
+		if (!defined($pass)) { $pass = pass(); }
+		$login =~ /(.*)/;
+		$login = $1;
+		$pass =~ /(.*)/;
+		$pass = $1;
+		if (&{$i . 'ChangePass'}($login, $pass))
+		{
+			myprint("Password has beend changed in $i database.");
+		} else {
+			myprint("Error changing " . $i . " password: $myerr");
+		}
+	}
+}
+
+# removeUser() - adds given user to all backends
+sub removeUser
+{
+	foreach my $i (@useBackends)
+	{
+		no strict 'refs';
+		if (&{$i . 'Remove'}($login))
+		{
+			myprint("User has been removed from $i database.");
+		} else {
+			myprint("Error removing user from " . $i . " database: $myerr");
+		}
+	}
+}
+
+sub setQuota
+{
+	if ($uname eq 'Linux')
+	{
+		$login =~ m/(.*)/;
+		$login = $1;
+		if (system("/usr/sbin/quotatool -u " . $login . " " . $quotaDefault . " /"))
+		{
+			$myerr = "quotatool error: $!";
+			return(0);
+		}
+		return(1);
+	} else {
+		$myerr = "I don't know how to set quota on $uname.";
+		return(0);
+	}
+	return(1);
+}
+
+system("logger starting mypasswd");
+if ($output eq 'syslog') { openlog($myname, 'pid', 'user'); }
+
+while (my $i = shift(@ARGV))
+{
+	if ($i =~ m/^-h$/)
+	{
+		usage();
+		exit(0);
+	} elsif ($i =~ m/^-V$/) {
+		myVersion();
+		exit(0);
+	} elsif ($i =~ m/^-l$/) {
+		$output = 'syslog';
+	} elsif ($i =~ m/^-d$/) {
+		$debug = 1;
+	} elsif ($i =~ m/^-q$/) {
+		$quiet = 1;
+	} elsif ($i =~ m/^-w$/) {
+		$htpasswdFile = shift(@ARGV);
+	} elsif ($i =~ m/^-g$/) {
+		$generatePasswd = 1;
+	} elsif ($i =~ m/^-S$/) {
+		push(@useBackends, 'system');
+	} elsif ($i =~ m/^-M$/) {
+		push(@useBackends, 'samba');
+	} elsif ($i =~ m/^-H$/) {
+		push(@useBackends, 'htpasswd');
+	} elsif ($i =~ m/^-a$/) {
+		$action = 'add';
+	} elsif ($i =~ m/^-c$/) {
+		$action = 'change';
+	} elsif ($i =~ m/^-r$/) {
+		$action = 'remove';
+	} elsif ($i =~ m/^-n$/) {
+		$name = shift;
+	} else {
+		push(@otherArgs, $i);
+		push(@otherArgs, @ARGV);
+		@ARGV = ();
+	}
+}
+
+if (($#otherArgs < 0) || !defined($action))
+{
+	usage();
+	exit(0);
+}
+
+if ($#useBackends == -1) { @useBackends = @backends; }
+
+#selfTest();
+
+$login = shift(@otherArgs);
+if (!defined($name)) { $name = $login }
+
+if ($action eq 'add')
+{
+	addUser();
+	myprint("Setting quota for user.");
+	if (!setQuota())
+	{
+		myprint("Error setting quota: " . $myerr);
+	}
+} elsif ($action eq 'change') {
+	changePass();
+} elsif ($action eq 'remove') {
+	removeUser();
+}
+
+system("logger mypasswd exit");
