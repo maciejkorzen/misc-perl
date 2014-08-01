@@ -2,9 +2,10 @@
 
 # *******************************************************************************
 # *
-# * check_asm   2014-01-05
+# * check_asm   2014-08-01
 # *
 # * Copyright 2014 (c) Krzysztof Lewandowski (krzysztof.lewandowski@fastmail.fm)
+# * Copyright 2014 (c) Maciej Korzen (maciek@korzen.org)
 # *
 # * Description: Nagios plug-in for Oracle ASM instance (11g and above)
 # *              It checks:
@@ -41,10 +42,34 @@
 # * check_asm --asm_home=/oracle/gridhome  --action=dgstate
 # * [OK] Diskgroup state: (CRS: MOUNTED) (FRA: MOUNTED) (DATA: MOUNTED)
 # * check_asm --asm_home=/oracle/gridhome  --action=alertlogerror
-# * [OK] ASM AlertLog Errors: 0
+# * [OK] ASM AlertLog Errors: 0 | errors=2;;;;
 # * check_asm --asm_home=/oracle/gridhome  --action=usedspace  --threshold DATA=95:98
-# * [OK] Diskgroup used space: (CRS: 7.94%: OK) (FRA: 1.80%: OK) (DATA: 55.82%: OK)
+# * [OK] Diskgroup used space: (CRS: 7.94%: OK) (FRA: 1.80%: OK) (DATA: 55.82%: OK) | 'CRS'=80.03%;85;95 'FRA'=54.16%;85;95 'DATA'=58.22%;85;95
 # * 
+# *******************************************************************************
+
+# ***** LICENSE *****************************************************************
+# * This program is free software; you can redistribute it and/or modify
+# * it under the terms of the GNU General Public License as published by
+# * the Free Software Foundation; version 2 dated June, 1991.
+# *
+# * This program is distributed in the hope that it will be useful,
+# * but WITHOUT ANY WARRANTY; without even the implied warranty of
+# * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# * GNU General Public License for more details.
+# *
+# * You should have received a copy of the GNU General Public License
+# * along with this program; if not, write to the Free Software
+# * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+# *******************************************************************************
+
+# ***** CHANGELOG ***************************************************************
+# * 2014-08-01 Maciej Korzen
+# *   Side note:
+# *     I've found this script at http://exchange.nagios.org/directory/Plugins/Databases/Oracle/check_asm/details.
+# *     It's states that it is licensed on the terms of GPL.
+# *   Added performance data output.
+# *   Added license information.
 # *******************************************************************************
 
 use Getopt::Long qw(:config no_ignore_case);
@@ -56,6 +81,7 @@ my %disk_groups_thresholds = ();
 my ($defWarnPerc, $defCritPerc) = (85, 95);
 my %nagios_exit_codes = ( 'UNKNOWN', 3, 'OK', 0, 'WARNING', 1, 'CRITICAL', 2 );
 my $output_msg = '';
+my $output_perf = '';
 my $status = 'OK';
 my $action = '';
 my $help = '';
@@ -132,6 +158,7 @@ select state, TOTAL_MB, USABLE_FILE_MB, NAME from v\\\$asm_diskgroup;
     } else {
       $output_msg .= "($dgname: $dgstate) ";
     }
+    $output_perf .= "'" . $dgname . "'=" . $rounded_used_space . "%;" . $warnPerc . ";" . $critPerc . " ";
     # Once processed, we drop command line disk group and threshold
     delete($disk_groups_thresholds{$dgname});
   }
@@ -166,6 +193,7 @@ select count(*) from X\\\$DBGALERTEXT where ORIGINATING_TIMESTAMP > systimestamp
 
   $status = 'WARNING' if $numerrors != 0;
   $output_msg = "ASM AlertLog Errors: $numerrors";
+  $output_perf = "errors=" . $numerrors . ";;;;";
 }
 else {
   $status = 'CRITICAL';
@@ -180,7 +208,12 @@ if ( scalar keys %disk_groups_thresholds ) {
   }
 }
 
-print "[${status}] $output_msg\n";
+print "[${status}] $output_msg";
+if ($output_perf ne '')
+{
+	print " | " . $output_perf;
+}
+print "\n";
 exit $nagios_exit_codes{ $status };
 
 
