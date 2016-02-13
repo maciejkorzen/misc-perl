@@ -1,0 +1,94 @@
+#!/usr/bin/perl -T
+
+##### DESCRIPTION ###########################################################
+# Nagios plugin to check if there is any mail in /var/spool/mail/* files.
+# If any of the files has size greater then 0, then script assumes that there
+# is mail.
+#
+##### USAGE #################################################################
+# Run this script. No arguments needed.
+#
+##### LICENSE ###############################################################
+# Copyright 2016 Maciej Korzen
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 dated June, 1991.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+##### AUTHOR ################################################################
+# Maciej Korzen
+# maciek@korzen.org, mkorzen@gmail.com
+# http://www.korzen.org/
+
+use strict;
+use warnings;
+use File::Basename;
+use File::stat;
+
+$ENV{'LANG'} = 'C';
+$ENV{'LC_ALL'} = 'C';
+$ENV{'PATH'} = "/bin:/usr/bin:/usr/local/bin";
+
+my $myname = basename($0);
+my @enderrormessage = ();
+my $exitcode = 0;
+my @varSpoolMailDirs = qw:/var/mail /var/spool/mail:;
+my @perfdata = ();
+
+sub blad
+{
+	print STDERR $_[0] . "\n";
+	exit(1);
+}
+
+foreach my $dir1 (@varSpoolMailDirs)
+{
+	opendir(DIR1, $dir1) or next;
+	my @listaPlikow = ();
+	while (my $plik1 = readdir(DIR1))
+	{
+		my $fullFilePath = $dir1 . "/" . $plik1;
+		if ((!($plik1 =~ /^\./)) && (!(-d $fullFilePath)))
+		{
+			#print "DEBUG: znalazlem plik '" . $fullFilePath . "'\n";
+			push(@listaPlikow, $fullFilePath);
+		}
+	}
+	close(DIR1);
+	for my $plik1 (sort(@listaPlikow))
+	{
+		my $statOut;
+		if (!($statOut = stat($plik1)))
+		{
+			push(@enderrormessage, "Can't stat() file '" . $plik1 . "'.");
+			$exitcode = 1 unless ($exitcode > 1);
+		} else {
+			push(@perfdata, $plik1 . "=" . $statOut->size . ";0;0;0");
+			if ($statOut->size > 0)
+			{
+				#print "Plik '" . $plik1 . "' ma rozmiar " . $statOut->size . "\n" ;
+				push(@enderrormessage, "File '" . $plik1 . "' is " . $statOut->size . " bytes in size.");
+				$exitcode = 2 unless ($exitcode > 2);
+			}
+		}
+	}
+	if ($#enderrormessage == -1)
+	{
+		print "OK. No mail in " . $dir1 . ". | " . join(" ", @perfdata) . "\n";
+	} else {
+		print "ERROR!\n";
+		print(join("\n", @enderrormessage) . " | " . join(" ", @perfdata) . "\n");
+	}
+	exit($exitcode);
+}
+print "ERROR! Couldn't find any spool mail dir. Search path: " . join(", ", @varSpoolMailDirs) . ".\n";
+exit(2);
